@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Phage Gene Visualizer</title>
+
+    <!-- CGView stylesheet -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cgview/dist/cgview.css" />
+
+    <!-- Dependencies -->
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cgview/dist/cgview.min.js"></script>
+
+    <style>
+      body {
+        font-family: sans-serif;
+        text-align: center;
+        background-color: #f8f9fa;
+        margin: 0;
+        padding: 20px;
+      }
+      #my-viewer {
+        margin: 20px auto;
+        width: 700px;
+        height: 700px;
+        border: 1px solid #ccc;
+        background-color: white;
+      }
+      input[type="file"] {
+        margin: 10px;
+        padding: 8px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h2>Phage Gene Visualizer</h2>
+    <p>Bacterial gene은 보이지 않게 설정되어 있으니 참고해주세요.</p>
+
+    <input type="file" id="jsonFile" accept=".json" />
+
+    <div id="controls">
+      <button id="btn-reset">Reset</button>
+      <button id="btn-zoom-in">Zoom In</button>
+      <button id="btn-zoom-out">Zoom Out</button>
+      <button id="btn-move-left">← Move Left</button>
+      <button id="btn-move-right">Move Right →</button>
+      <button id="btn-toggle-format">Toggle Format</button>
+      <button id="btn-toggle-labels">Toggle Labels</button>
+      <button id="btn-download">Download PNG</button>
+    </div>
+
+    <div id="my-viewer"></div>
+
+    <script>
+      let cgv = null;
+
+      // 업로드 이벤트
+      document.getElementById("jsonFile").addEventListener("change", (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function (e) {
+          try {
+            const jsonData = JSON.parse(e.target.result);
+
+            // 기존 뷰어 초기화
+            document.getElementById("my-viewer").innerHTML = "";
+
+            // CGView Viewer 생성
+            cgv = new CGView.Viewer("#my-viewer", {
+              height: 700,
+              width: 700
+            });
+
+            // JSON 구조 로드
+            cgv.io.loadJSON(jsonData);
+
+            // 실제 그리기
+            cgv.draw();
+            console.log("JSON 파일 로드 완료:", file.name);
+          } catch (err) {
+            console.error("JSON 파싱 오류:", err);
+            alert("올바른 JSON 파일이 아닙니다.\n" + err.message);
+          }
+        };
+        reader.readAsText(file, "utf-8");
+      });
+
+      // 버튼 클릭 헬퍼
+      const onClick = (id, func) => {
+        const btn = document.getElementById(id);
+        btn.addEventListener("click", () => {
+          if (!cgv) {
+            alert("먼저 JSON 파일을 업로드하세요!");
+            return;
+          }
+          func();
+        });
+      };
+
+      // 버튼 동작들 등록
+      onClick("btn-reset", () => cgv.reset());
+      onClick("btn-zoom-in", () => cgv.zoomIn());
+      onClick("btn-zoom-out", () => cgv.zoomOut());
+      onClick("btn-move-left", () => cgv.moveLeft());
+      onClick("btn-move-right", () => cgv.moveRight());
+      onClick("btn-toggle-format", () => {
+        const format = cgv.format === "circular" ? "linear" : "circular";
+        cgv.settings.update({ format: format });
+        cgv.draw();
+      });
+      onClick("btn-toggle-labels", () => {
+        cgv.annotation.update({ visible: !cgv.annotation.visible });
+        cgv.draw();
+      });
+      onClick("btn-download", () => {
+        const height = 2000;
+        const width = (cgv.width / cgv.height) * height;
+        cgv.io.downloadImage(width, height, "cgview_map.png");
+      });
+    </script>
+  </body>
+</html>
