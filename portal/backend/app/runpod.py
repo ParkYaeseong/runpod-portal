@@ -57,6 +57,7 @@ PIPELINES: dict[str, PipelineDefinition] = {
                 field_type="select",
                 required=True,
                 options=[{"value": "full_dbs", "label": "Full"}, {"value": "reduced_dbs", "label": "Reduced"}],
+                helper="Reduced 프리셋은 준비 중이며 현재는 Full만 지원합니다.",
             ),
             InputField(
                 name="max_template_date",
@@ -154,4 +155,3 @@ def build_pipeline_payload(key: str, parameters: Dict[str, Any], sequence: str |
     if input_archive:
         payload["input_archive"] = input_archive
     return payload
-

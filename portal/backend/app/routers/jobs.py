@@ -43,7 +43,7 @@ async def create_job(
     notes: str | None = Form(None),
     preferred_download_dir: str | None = Form(None),
     sequence: str | None = Form(None),
-    files: list[UploadFile] | None = File(None),
+    files: UploadFile | list[UploadFile] | None = File(None),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -53,6 +53,34 @@ async def create_job(
         parameter_data = json.loads(parameters or "{}")
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid parameter payload.") from exc
+
+    if pipeline == "diffdock":
+        jobs_payload = parameter_data.get("jobs")
+        if not isinstance(jobs_payload, list) or not jobs_payload:
+            raise HTTPException(status_code=400, detail="DiffDock jobs definition is required.")
+        for idx, item in enumerate(jobs_payload, start=1):
+            if not isinstance(item, dict):
+                raise HTTPException(status_code=400, detail=f"Invalid job entry at index {idx}.")
+            required_keys = ("complex_name", "protein_path", "ligand_description")
+            if not all(item.get(key) for key in required_keys):
+                raise HTTPException(status_code=400, detail=f"Missing required DiffDock fields in job #{idx}.")
+            ligand_type = item.get("ligand_type")
+            if ligand_type not in {"sdf", "smiles"}:
+                raise HTTPException(status_code=400, detail=f"Unsupported ligand type in job #{idx}.")
+
+    phastest_input_type = None
+    if pipeline == "phastest":
+        phastest_input_type = parameter_data.get("input_type")
+        mode = parameter_data.get("mode")
+        sample_name = parameter_data.get("sample_name")
+        if phastest_input_type not in {"fasta", "contig", "genbank"}:
+            raise HTTPException(status_code=400, detail="Invalid PHASTEST input type.")
+        if mode not in {"lite", "deep"}:
+            raise HTTPException(status_code=400, detail="Invalid PHASTEST mode.")
+        if not sample_name:
+            raise HTTPException(status_code=400, detail="Sample name is required for PHASTEST.")
+        if phastest_input_type == "genbank" and not parameter_data.get("accession"):
+            raise HTTPException(status_code=400, detail="GenBank accession is required for this mode.")
 
     job = models.Job(
         title=title,
@@ -68,8 +96,14 @@ async def create_job(
     db.refresh(job)
 
     archive_payload = None
-    if files:
-        saved_files = save_uploads(current_user.id, job.id, files)
+    file_list: list[UploadFile] = []
+    if isinstance(files, list):
+        file_list = files
+    elif files:
+        file_list = [files]
+
+    if file_list:
+        saved_files = save_uploads(current_user.id, job.id, file_list)
         archive_path = Path(saved_files[0]).parent / "inputs.tar.gz"
         build_archive(saved_files, archive_path)
         archive_payload = {
@@ -81,7 +115,11 @@ async def create_job(
         job.input_archive_path = str(archive_path)
 
     pipeline_meta = PIPELINES[pipeline]
-    if pipeline_meta.requires_archive and not archive_payload:
+    requires_archive = pipeline_meta.requires_archive
+    if pipeline == "phastest" and phastest_input_type == "genbank":
+        requires_archive = False
+
+    if requires_archive and not archive_payload:
         raise HTTPException(status_code=400, detail="This pipeline requires file uploads.")
 
     endpoint_id = pipeline_endpoint(pipeline)
@@ -156,4 +194,3 @@ def _get_job_or_404(db: Session, user_id: int, job_id: str) -> models.Job:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     return job
-

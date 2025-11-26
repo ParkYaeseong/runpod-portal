@@ -1,4 +1,9 @@
-﻿const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8400";
+const browserApiBase =
+  typeof window !== "undefined" ? process.env.NEXT_PUBLIC_BROWSER_API_BASE_URL ?? "" : null;
+
+const serverApiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8400";
+
+const API_BASE = browserApiBase ?? serverApiBase;
 
 type FetchOptions = {
   method?: string;
@@ -135,4 +140,3 @@ export interface JobResponse {
   parameters: Record<string, unknown>;
   artifacts: ArtifactMeta[];
 }
-

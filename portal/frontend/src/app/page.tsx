@@ -20,6 +20,36 @@ import { triggerDownload } from "@/lib/download";
 import { JobStatusBadge } from "@/components/JobStatusBadge";
 import { NglViewer } from "@/components/NglViewer";
 
+type DiffdockJobInput = {
+  complex_name: string;
+  protein_path: string;
+  ligand_description: string;
+  ligand_type: "sdf" | "smiles";
+  protein_sequence: string;
+};
+
+const createBlankDiffdockJob = (): DiffdockJobInput => ({
+  complex_name: "",
+  protein_path: "",
+  ligand_description: "",
+  ligand_type: "sdf",
+  protein_sequence: "",
+});
+
+type PhastestConfig = {
+  input_type: "fasta" | "contig" | "genbank";
+  mode: "lite" | "deep";
+  sample_name: string;
+  accession: string;
+};
+
+const defaultPhastestConfig: PhastestConfig = {
+  input_type: "fasta",
+  mode: "lite",
+  sample_name: "",
+  accession: "",
+};
+
 export default function HomePage() {
   const [token, setToken] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
@@ -99,11 +129,27 @@ function AuthSwitcher({ mode, onModeChange, onLogin, onRegister, loading, error 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [localError, setLocalError] = useState<string | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    setLocalError(null);
     if (mode === "register" && password !== confirm) {
-      alert("비밀번호 확인이 일치하지 않습니다.");
+      setLocalError("비밀번호 확인이 일치하지 않습니다.");
+      return;
+    }
+    if (mode === "register") {
+      if (password.length < 6) {
+        setLocalError("비밀번호는 최소 6자 이상이어야 합니다.");
+        return;
+      }
+      if (password.length > 72) {
+        setLocalError("비밀번호는 최대 72자까지 가능합니다.");
+        return;
+      }
+    }
+    if (!username.trim() || !password.trim()) {
+      setLocalError("아이디와 비밀번호를 모두 입력하세요.");
       return;
     }
     if (mode === "login") {
@@ -134,6 +180,7 @@ function AuthSwitcher({ mode, onModeChange, onLogin, onRegister, loading, error 
             onChange={(e) => setPassword(e.target.value)}
             required
           />
+          <p className="mt-1 text-xs text-slate-500">6~72자 사이의 비밀번호를 사용하세요.</p>
         </div>
         {mode === "register" && (
           <div>
@@ -147,7 +194,7 @@ function AuthSwitcher({ mode, onModeChange, onLogin, onRegister, loading, error 
             />
           </div>
         )}
-        {error && <p className="text-sm text-rose-600">{error}</p>}
+        {(localError || error) && <p className="text-sm text-rose-600">{localError || error}</p>}
         <button
           type="submit"
           disabled={loading}
@@ -214,13 +261,14 @@ function Dashboard({ token, onLogout }: DashboardProps) {
   const [sequence, setSequence] = useState("");
   const [title, setTitle] = useState("새로운 작업");
   const [notes, setNotes] = useState("");
-  const [downloadDir, setDownloadDir] = useState("/data/results");
   const [paramState, setParamState] = useState<Record<string, string>>({ model_preset: "monomer", db_preset: "full_dbs" });
   const [uploads, setUploads] = useState<File[]>([]);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [diffdockJobs, setDiffdockJobs] = useState<DiffdockJobInput[]>([createBlankDiffdockJob()]);
+  const [phastestConfig, setPhastestConfig] = useState<PhastestConfig>(defaultPhastestConfig);
 
   const retentionDays = pipelineData?.retentionDays ?? 7;
-  const pipelines = pipelineData?.pipelines ?? [];
+  const pipelines = useMemo(() => pipelineData?.pipelines ?? [], [pipelineData]);
   const selectedPipeline = pipelines.find((p) => p.key === selectedPipelineKey) ?? pipelines[0];
   const selectedJob = useMemo(() => jobs?.find((job) => job.id === selectedJobId) ?? jobs?.[0], [jobs, selectedJobId]);
 
@@ -265,10 +313,52 @@ function Dashboard({ token, onLogout }: DashboardProps) {
 
   const handleSubmit = async () => {
     if (!selectedPipeline) return;
-    if (selectedPipeline.requiresArchive && uploads.length === 0) {
+    const normalizedParams: Record<string, unknown> = { ...paramState };
+
+    if (selectedPipeline.key === "diffdock") {
+      const sanitized = diffdockJobs
+        .map((job) => ({
+          complex_name: job.complex_name.trim(),
+          protein_path: job.protein_path.trim(),
+          ligand_description: job.ligand_description.trim(),
+          ligand_type: job.ligand_type,
+          protein_sequence: job.protein_sequence.trim(),
+        }))
+        .filter((job) => job.complex_name && job.protein_path && job.ligand_description);
+      if (sanitized.length === 0) {
+        setUploadError("DiffDock 복합체 정보를 최소 1개 이상 입력하세요.");
+        return;
+      }
+      normalizedParams.jobs = sanitized;
+    }
+
+    if (selectedPipeline.key === "phastest") {
+      if (!phastestConfig.sample_name.trim()) {
+        setUploadError("샘플 이름을 입력하세요.");
+        return;
+      }
+      normalizedParams.input_type = phastestConfig.input_type;
+      normalizedParams.mode = phastestConfig.mode;
+      normalizedParams.sample_name = phastestConfig.sample_name.trim();
+      if (phastestConfig.input_type === "genbank") {
+        if (!phastestConfig.accession.trim()) {
+          setUploadError("GenBank 모드에서는 Accession 번호가 필요합니다.");
+          return;
+        }
+        normalizedParams.accession = phastestConfig.accession.trim();
+      } else if (phastestConfig.accession.trim()) {
+        normalizedParams.accession = phastestConfig.accession.trim();
+      }
+    }
+
+    const needsArchive =
+      selectedPipeline.requiresArchive &&
+      !(selectedPipeline.key === "phastest" && phastestConfig.input_type === "genbank");
+    if (needsArchive && uploads.length === 0) {
       setUploadError("이 파이프라인은 최소 한 개의 파일이 필요합니다.");
       return;
     }
+
     setUploadError(null);
     setIsSubmitting(true);
     try {
@@ -276,8 +366,7 @@ function Dashboard({ token, onLogout }: DashboardProps) {
       form.append("title", title);
       form.append("pipeline", selectedPipeline.key);
       form.append("notes", notes);
-      form.append("preferred_download_dir", downloadDir);
-      form.append("parameters", JSON.stringify(paramState));
+      form.append("parameters", JSON.stringify(normalizedParams));
       if (selectedPipeline.supportsSequence && sequence.trim()) {
         form.append("sequence", sequence.trim());
       }
@@ -286,6 +375,8 @@ function Dashboard({ token, onLogout }: DashboardProps) {
       setUploads([]);
       setSequence("");
       setNotes("");
+      setDiffdockJobs([createBlankDiffdockJob()]);
+      setPhastestConfig(defaultPhastestConfig);
       await refreshJobs();
     } catch (error: any) {
       setUploadError(error.message || "작업 생성 중 오류가 발생했습니다.");
@@ -330,7 +421,7 @@ function Dashboard({ token, onLogout }: DashboardProps) {
       <section className="mx-auto max-w-7xl px-6 py-6">
         <div className="rounded-2xl border border-brand-100 bg-white p-6 text-sm text-slate-600 shadow-sm">
           <p>
-            ?? 업로드한 데이터와 결과물은 서버 용량을 보호하기 위해 <strong>{retentionDays}일</strong> 뒤 자동으로 삭제됩니다. 중요한 결과는 즉시 다운로드 경로를 지정하거나 외부 스토리지에 백업하세요.
+            알림: 업로드한 데이터와 결과물은 서버 용량을 보호하기 위해 <strong>{retentionDays}일</strong> 뒤 자동으로 삭제됩니다. 중요한 결과는 즉시 다운로드 경로나 외부 스토리지에 백업하세요.
           </p>
         </div>
       </section>
@@ -348,10 +439,12 @@ function Dashboard({ token, onLogout }: DashboardProps) {
                 onNotesChange={setNotes}
                 sequence={sequence}
                 onSequenceChange={setSequence}
-                downloadDir={downloadDir}
-                onDownloadDirChange={setDownloadDir}
                 paramState={paramState}
                 onParamChange={handleParamChange}
+                diffdockJobs={diffdockJobs}
+                onDiffdockJobsChange={setDiffdockJobs}
+                phastestConfig={phastestConfig}
+                onPhastestConfigChange={setPhastestConfig}
                 uploads={uploads}
                 onFiles={handleFiles}
                 onFolder={handleFolder}
@@ -390,16 +483,16 @@ type PipelineSelectorProps = {
 function PipelineSelector({ pipelines, selected, onSelect }: PipelineSelectorProps) {
   const copyMap: Record<string, { description: string; instructions: string }> = {
     alphafold: {
-      description: "??? ?? ??? ?? ??",
-      instructions: "FASTA, ?? ???, ?? ZIP? ?????.",
+      description: "단백질 구조 예측",
+      instructions: "FASTA 서열을 붙여 넣거나 ZIP으로 묶어서 업로드하고 모델/DB 옵션을 선택하세요.",
     },
     diffdock: {
-      description: "?? ???-??? ??",
-      instructions: "PDB/SDF ?? ??? ? ?? ??????.",
+      description: "리간드 도킹/포즈 예측",
+      instructions: "수용체 PDB와 리간드 SDF를 함께 올리고 그리드·시드 옵션을 조정하세요.",
     },
     phastest: {
-      description: "?? ?? ??? ???",
-      instructions: "Jupyter?? ??? CSV/HTML/FASTA? ??? ?????.",
+      description: "PHASTEST 바이러스 분석",
+      instructions: "Jupyter에서 내보낸 CSV/HTML/FASTA 묶음을 업로드하면 보고서를 생성합니다.",
     },
   };
   return (
@@ -432,10 +525,12 @@ type SubmissionPanelProps = {
   onNotesChange: (value: string) => void;
   sequence: string;
   onSequenceChange: (value: string) => void;
-  downloadDir: string;
-  onDownloadDirChange: (value: string) => void;
   paramState: Record<string, string>;
   onParamChange: (name: string, value: string) => void;
+  diffdockJobs: DiffdockJobInput[];
+  onDiffdockJobsChange: (jobs: DiffdockJobInput[]) => void;
+  phastestConfig: PhastestConfig;
+  onPhastestConfigChange: (config: PhastestConfig) => void;
   uploads: File[];
   onFiles: (files: FileList | null) => void;
   onFolder: (files: FileList | null) => void;
@@ -454,8 +549,10 @@ function SubmissionPanel(props: SubmissionPanelProps) {
     onNotesChange,
     sequence,
     onSequenceChange,
-    downloadDir,
-    onDownloadDirChange,
+    diffdockJobs,
+    onDiffdockJobsChange,
+    phastestConfig,
+    onPhastestConfigChange,
     paramState,
     onParamChange,
     uploads,
@@ -480,24 +577,13 @@ function SubmissionPanel(props: SubmissionPanelProps) {
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-xl font-semibold text-slate-900">{pipeline.label} 작업 세팅</h3>
-          <p className="text-sm text-slate-500">모든 입력을 확인한 뒤 "작업 실행" 버튼을 누르세요.</p>
+          <p className="text-sm text-slate-500">모든 입력을 확인한 뒤 &quot;작업 실행&quot; 버튼을 누르세요.</p>
         </div>
         <span className="rounded-full bg-brand-100 px-3 py-1 text-xs font-semibold text-brand-700">{pipeline.previewKind.toUpperCase()}</span>
       </div>
-      <div className="mt-6 grid gap-4 md:grid-cols-2">
-        <div>
-          <label className="text-sm font-semibold text-slate-600">작업 제목</label>
-          <input className="mt-1 w-full rounded-2xl border border-slate-200 px-4 py-3" value={title} onChange={(e) => onTitleChange(e.target.value)} />
-        </div>
-        <div>
-          <label className="text-sm font-semibold text-slate-600">결과 저장 경로</label>
-          <input
-            className="mt-1 w-full rounded-2xl border border-slate-200 px-4 py-3"
-            value={downloadDir}
-            onChange={(e) => onDownloadDirChange(e.target.value)}
-            placeholder="/data/results/user"
-          />
-        </div>
+      <div className="mt-6">
+        <label className="text-sm font-semibold text-slate-600">작업 제목</label>
+        <input className="mt-1 w-full rounded-2xl border border-slate-200 px-4 py-3" value={title} onChange={(e) => onTitleChange(e.target.value)} />
       </div>
       <div className="mt-4">
         <label className="text-sm font-semibold text-slate-600">설명 / 메모</label>
@@ -509,6 +595,7 @@ function SubmissionPanel(props: SubmissionPanelProps) {
           placeholder="동일한 파라미터를 기록해 두면 재현성이 좋아집니다."
         />
       </div>
+
       <div className="mt-6 grid gap-4 md:grid-cols-2">
         {pipeline.inputFields.map((field) => (
           <div key={field.name}>
@@ -542,6 +629,19 @@ function SubmissionPanel(props: SubmissionPanelProps) {
           </div>
         ))}
       </div>
+
+      {pipeline.key === "diffdock" && (
+        <div className="mt-6">
+          <DiffdockJobsEditor jobs={diffdockJobs} onChange={onDiffdockJobsChange} />
+        </div>
+      )}
+
+      {pipeline.key === "phastest" && (
+        <div className="mt-6">
+          <PhastestConfigForm config={phastestConfig} onChange={onPhastestConfigChange} />
+        </div>
+      )}
+
       {pipeline.supportsSequence && (
         <div className="mt-4">
           <label className="text-sm font-semibold text-slate-600">서열 입력 (선택)</label>
@@ -594,6 +694,187 @@ function SubmissionPanel(props: SubmissionPanelProps) {
           {submitting ? "실행 중..." : "작업 실행"}
         </button>
       </div>
+    </div>
+  );
+}
+
+type DiffdockJobsEditorProps = {
+  jobs: DiffdockJobInput[];
+  onChange: (jobs: DiffdockJobInput[]) => void;
+};
+
+function DiffdockJobsEditor({ jobs, onChange }: DiffdockJobsEditorProps) {
+  const updateJob = (index: number, field: keyof DiffdockJobInput, value: string | DiffdockJobInput["ligand_type"]) => {
+    onChange(
+      jobs.map((job, idx) =>
+        idx === index
+          ? {
+              ...job,
+              [field]: value,
+            }
+          : job
+      )
+    );
+  };
+
+  const addJob = () => onChange([...jobs, createBlankDiffdockJob()]);
+  const removeJob = (index: number) => {
+    if (jobs.length === 1) return;
+    onChange(jobs.filter((_, idx) => idx !== index));
+  };
+
+  return (
+    <div className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-semibold text-slate-700">DiffDock 복합체 목록</p>
+          <p className="text-xs text-slate-500">업로드한 ZIP 내부 경로(PDB/SDF) 또는 SMILES 문자열을 입력하세요.</p>
+        </div>
+        <button type="button" className="text-sm font-semibold text-brand-600" onClick={addJob}>
+          + 복합체 추가
+        </button>
+      </div>
+      {jobs.map((job, index) => (
+        <div key={`diffdock-${index}`} className="space-y-3 rounded-2xl bg-white p-4 shadow-sm">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-semibold text-slate-700">복합체 #{index + 1}</p>
+            {jobs.length > 1 && (
+              <button type="button" className="text-xs text-rose-500" onClick={() => removeJob(index)}>
+                제거
+              </button>
+            )}
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-slate-600">Complex 이름</label>
+            <input
+              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+              value={job.complex_name}
+              onChange={(e) => updateJob(index, "complex_name", e.target.value)}
+              placeholder="fold_1_01067"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-slate-600">Protein PDB 경로</label>
+            <input
+              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+              value={job.protein_path}
+              onChange={(e) => updateJob(index, "protein_path", e.target.value)}
+              placeholder="inputs/fold_1_01067_model_0.pdb"
+            />
+          </div>
+          <div className="grid gap-3 md:grid-cols-[0.4fr,0.6fr]">
+            <div>
+              <label className="text-xs font-semibold text-slate-600">Ligand 형식</label>
+              <select
+                className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                value={job.ligand_type}
+                onChange={(e) => updateJob(index, "ligand_type", e.target.value as DiffdockJobInput["ligand_type"])}
+              >
+                <option value="sdf">SDF 파일 경로</option>
+                <option value="smiles">SMILES 문자열</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-600">
+                {job.ligand_type === "sdf" ? "Ligand SDF 경로" : "Ligand SMILES"}
+              </label>
+              <input
+                className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                value={job.ligand_description}
+                onChange={(e) => updateJob(index, "ligand_description", e.target.value)}
+                placeholder={job.ligand_type === "sdf" ? "inputs/input_C6.sdf" : "CC1=CC=C(C=C1)O"}
+              />
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-slate-600">Protein 서열 (선택)</label>
+            <textarea
+              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-mono"
+              rows={3}
+              value={job.protein_sequence}
+              onChange={(e) => updateJob(index, "protein_sequence", e.target.value)}
+              placeholder=">sp|...\nMVTES..."
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+type PhastestConfigFormProps = {
+  config: PhastestConfig;
+  onChange: (config: PhastestConfig) => void;
+};
+
+function PhastestConfigForm({ config, onChange }: PhastestConfigFormProps) {
+  const handleChange = <K extends keyof PhastestConfig>(field: K, value: PhastestConfig[K]) => {
+    onChange({
+      ...config,
+      [field]: value,
+    });
+  };
+
+  return (
+    <div className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <p className="text-sm font-semibold text-slate-700">PHASTEST 입력 설정</p>
+      <div className="grid gap-4 md:grid-cols-2">
+        <div>
+          <label className="text-xs font-semibold text-slate-600">Input Type</label>
+          <select
+            className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            value={config.input_type}
+            onChange={(e) => handleChange("input_type", e.target.value as PhastestConfig["input_type"])}
+          >
+            <option value="fasta">FASTA</option>
+            <option value="contig">Contig</option>
+            <option value="genbank">GenBank Accession</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-slate-600">Mode</label>
+          <select
+            className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            value={config.mode}
+            onChange={(e) => handleChange("mode", e.target.value as PhastestConfig["mode"])}
+          >
+            <option value="lite">Lite</option>
+            <option value="deep">Deep</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label className="text-xs font-semibold text-slate-600">샘플 이름</label>
+        <input
+          className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+          value={config.sample_name}
+          onChange={(e) => handleChange("sample_name", e.target.value)}
+          placeholder="CD_7908"
+        />
+      </div>
+      {config.input_type === "genbank" ? (
+        <div>
+          <label className="text-xs font-semibold text-slate-600">NCBI Accession</label>
+          <input
+            className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            value={config.accession}
+            onChange={(e) => handleChange("accession", e.target.value)}
+            placeholder="KF030445.1"
+          />
+          <p className="mt-1 text-xs text-slate-500">GenBank 모드에서는 파일 업로드 없이 Accession만 전송합니다.</p>
+        </div>
+      ) : (
+        <div>
+          <label className="text-xs font-semibold text-slate-600">참고 메모 (선택)</label>
+          <input
+            className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+            value={config.accession}
+            onChange={(e) => handleChange("accession", e.target.value)}
+            placeholder="필요 시 참고 Accession"
+          />
+          <p className="mt-1 text-xs text-slate-500">FASTA/Contig 모드는 반드시 파일을 업로드해야 합니다.</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -736,5 +1017,3 @@ function translate(text?: string) {
   };
   return text ? dictionary[text] || text : "";
 }
-
-

@@ -14,7 +14,8 @@ from .schemas import TokenData
 
 settings = get_settings()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
-password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# use pbkdf2_sha256 to avoid bcrypt backend issues & 72-byte truncation
+password_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -61,4 +62,3 @@ def get_current_user(db: Session = Depends(get_db), token: str = Depends(oauth2_
     if user is None:
         raise credentials_exception
     return user
-
